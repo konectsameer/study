@@ -2,17 +2,33 @@ import os
 import logging
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-import uvicorn
-
-from telegram import Update, Bot
-from telegram.constants import ParseMode
-from telegram.ext import Application, ApplicationBuilder
-
 from supabase import create_client
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+from telegram.ext import (
+    Application,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+)
+
 import google.generativeai as genai
+import pdfplumber
+import base64
+import requests
 
 # ---------------------------------------------------------
-#  CONFIG: Load from environment variables (Render)
+# Logging
+# ---------------------------------------------------------
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------
+# Load ENV Variables
 # ---------------------------------------------------------
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -20,83 +36,215 @@ SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 GEMINI_KEY = os.getenv("GEMINI_KEY")
 
 if not TELEGRAM_TOKEN or not SUPABASE_URL or not SUPABASE_KEY or not GEMINI_KEY:
-    raise Exception("Environment variables missing. Check TELEGRAM_TOKEN, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, GEMINI_KEY.")
+    raise Exception("Missing required environment variables!")
 
-# Init Supabase + Gemini
+# Supabase client
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Gemini client
 genai.configure(api_key=GEMINI_KEY)
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 # ---------------------------------------------------------
-#  FastAPI server (Render will serve this)
+# FastAPI app (for webhook)
 # ---------------------------------------------------------
-app = FastAPI()
-bot = Bot(token=TELEGRAM_TOKEN)
-
-# Build Telegram application (for processing updates)
-application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
+app_fast = FastAPI()
 
 # ---------------------------------------------------------
-#  Example processing logic
+# Send Inline Buttons
 # ---------------------------------------------------------
-async def process_message(update: Update):
-    """Basic text processing using Gemini."""
-    user_input = update.message.text
+def mode_buttons():
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Flashcards", callback_data="flashcards"),
+                InlineKeyboardButton("Notes", callback_data="notes"),
+                InlineKeyboardButton("Quiz", callback_data="quiz"),
+            ]
+        ]
+    )
 
-    model = genai.GenerativeModel("gemini-1.5-flash")
-    response = model.generate_content(user_input)
 
-    reply = response.text or "I could not generate a response."
-
-    await update.message.reply_text(reply)
-
-
-# Add handler
-from telegram.ext import MessageHandler, filters
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_message))
+async def send_mode_selector(chat_id, context):
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="Choose how you want me to process your input:",
+        reply_markup=mode_buttons(),
+    )
 
 
 # ---------------------------------------------------------
-#  Telegram Webhook Receiver Endpoint
+# Extract text from PDF
 # ---------------------------------------------------------
-@app.post("/webhook")
-async def webhook_handler(request: Request):
-    """Handle Telegram webhook updates."""
+def extract_pdf_text(file_path):
+    text = ""
+    with pdfplumber.open(file_path) as pdf:
+        for page in pdf.pages:
+            text += page.extract_text() or ""
+    return text.strip()
+
+
+# ---------------------------------------------------------
+# Process Text into Flashcards / Notes / Quiz
+# ---------------------------------------------------------
+async def process_with_gemini(text, mode):
+    prompt = ""
+
+    if mode == "flashcards":
+        prompt = f"""
+        Convert the following content into clean flashcards.
+        Return JSON list: [{{"front": "...", "back": "..."}}]
+        
+        CONTENT:
+        {text}
+        """
+
+    elif mode == "notes":
+        prompt = f"""
+        Convert the following content into clean study notes.
+        Provide markdown formatted bullet points.
+        
+        CONTENT:
+        {text}
+        """
+
+    elif mode == "quiz":
+        prompt = f"""
+        Generate 5 quiz questions with answers.
+        Format:
+        Q1:
+        A1:
+
+        CONTENT:
+        {text}
+        """
+
+    response = model.generate_content(prompt)
+    return response.text
+
+
+# ---------------------------------------------------------
+# Save to Supabase
+# ---------------------------------------------------------
+def save_to_supabase(user_id, mode, raw_text, output):
+    supabase.table("flashcards").insert(
+        {
+            "user_id": user_id,
+            "task": mode,
+            "raw_text": raw_text,
+            "result": output,
+        }
+    ).execute()
+
+
+# ---------------------------------------------------------
+# Handle normal text / images / PDFs
+# ---------------------------------------------------------
+async def incoming_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
+
+    # Show buttons
+    await send_mode_selector(chat_id, context)
+
+    # Save last user message for processing after button click
+    context.user_data["last_input"] = update.message
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="Now select Flashcards / Notes / Quiz 👆",
+    )
+
+
+# ---------------------------------------------------------
+# Callback button handler
+# ---------------------------------------------------------
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    mode = query.data  # flashcards / notes / quiz
+    user_message = context.user_data.get("last_input")
+
+    if not user_message:
+        await query.edit_message_text("Send something first!")
+        return
+
+    raw_text = ""
+
+    # TEXT
+    if user_message.text:
+        raw_text = user_message.text
+
+    # IMAGES
+    elif user_message.photo:
+        file_id = user_message.photo[-1].file_id
+        file = await context.bot.get_file(file_id)
+        img_data = requests.get(file.file_path).content
+        image_b64 = base64.b64encode(img_data).decode()
+        raw_text = model.generate_content(
+            f"Extract text from this image encoded as base64:\n{image_b64}"
+        ).text
+
+    # PDF FILE
+    elif user_message.document:
+        file_id = user_message.document.file_id
+        tg_file = await context.bot.get_file(file_id)
+        pdf_bytes = requests.get(tg_file.file_path).content
+
+        with open("temp.pdf", "wb") as f:
+            f.write(pdf_bytes)
+
+        raw_text = extract_pdf_text("temp.pdf")
+
+    else:
+        await query.edit_message_text("Unsupported message type.")
+        return
+
+    # Process with Gemini
+    result = await process_with_gemini(raw_text, mode)
+
+    # Save in Supabase
+    save_to_supabase(str(user_message.chat_id), mode, raw_text, result)
+
+    await query.edit_message_text(
+        f"**Your {mode.capitalize()} are ready:**\n\n{result}",
+        parse_mode="Markdown",
+    )
+
+
+# ---------------------------------------------------------
+# Telegram Webhook Entry Point
+# ---------------------------------------------------------
+@app_fast.post("/webhook")
+async def telegram_webhook(request: Request):
     data = await request.json()
-    update = Update.de_json(data, bot)
-
-    await application.initialize()
-    await application.process_update(update)
-    return JSONResponse({"ok": True})
+    update = Update.de_json(data, bot_app.bot)
+    await bot_app.process_update(update)
+    return JSONResponse({"status": "ok"})
 
 
 # ---------------------------------------------------------
-#  Root test endpoint
+# Build Telegram Application (no polling!)
 # ---------------------------------------------------------
-@app.get("/")
-async def home():
-    return {"status": "Bot running (webhook mode)"}
+bot_app = (
+    Application.builder()
+    .token(TELEGRAM_TOKEN)
+    .build()
+)
 
-
-# ---------------------------------------------------------
-#  Auto-set Telegram webhook on startup
-# ---------------------------------------------------------
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # MUST match your Render domain + /webhook
-
-@app.on_event("startup")
-async def set_webhook():
-    if not WEBHOOK_URL:
-        raise Exception("WEBHOOK_URL env variable missing.")
-
-    await bot.delete_webhook()
-    await bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
-
-    logging.info("Webhook set to: %s/webhook", WEBHOOK_URL)
+bot_app.add_handler(MessageHandler(filters.ALL, incoming_message))
+bot_app.add_handler(CallbackQueryHandler(button_handler))
 
 
 # ---------------------------------------------------------
-#  Run FastAPI server (Render uses this)
+# Root Endpoint
 # ---------------------------------------------------------
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run("bot:app", host="0.0.0.0", port=port)
+@app_fast.get("/")
+def home():
+    return {"status": "running"}
+
+
+# ---------------------------------------------------------
+# Start Message
+# ---------------------------------------------------------
+print("Bot with webhook is ready!")
