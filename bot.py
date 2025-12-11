@@ -248,3 +248,30 @@ def home():
 # Start Message
 # ---------------------------------------------------------
 print("Bot with webhook is ready!")
+
+
+# ---------------------------------------------------------
+# Root Endpoint
+# ---------------------------------------------------------
+@app_fast.get("/")
+def home():
+    return {"status": "running"}
+
+
+# ---------------------------------------------------------
+# Uvicorn Startup (Render fix)
+# ---------------------------------------------------------
+if __name__ == "__main__":
+    import uvicorn
+    import os
+
+    port = int(os.environ.get("PORT", 8000))
+    print(f"Starting server on port {port}...")
+
+    uvicorn.run(
+        "bot:app_fast",
+        host="0.0.0.0",
+        port=port,
+        workers=1
+    )
+
