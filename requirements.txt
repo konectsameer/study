@@ -1,0 +1,7 @@
+python-telegram-bot~=20.4
+supabase~=1.2.0
+google-generativeai~=0.2.0
+pytesseract
+pillow
+pdfplumber
+python-dotenv
