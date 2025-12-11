@@ -39,10 +39,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ---------- CONFIG: read from environment ----------
-TELEGRAM_TOKEN = os.getenv("8234219151:AAHti5G0V7wfguG4Cau7XjJiZ_p9Uv4oifI")         # set to your telegram bot token
-SUPABASE_URL = os.getenv("https://xosmgyzafvgdwqonlaym.supabase.co")             # set to your supabase url
-SUPABASE_KEY = os.getenv("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhvc21neXphZnZnZHdxb25sYXltIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NTI2MTA1OSwiZXhwIjoyMDgwODM3MDU5fQ.45ZgYyPZ5PEkDkQgBU9RAouyRKToq1fdFT6tNdSWMPA")# set to your supabase service-role key (or anon key if only insert)
-GEMINI_KEY = os.getenv("AIzaSyDPjOfue8toc0hpKH7EHzhzgY2RsvFTheg")                 # set to your Google Gemini API key
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")         # set to your telegram bot token
+SUPABASE_URL = os.getenv("SUPABASE_URL")             # set to your supabase url
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")# set to your supabase service-role key (or anon key if only insert)
+GEMINI_KEY = os.getenv("GEMINI_KEY")   
 
 if not (TELEGRAM_TOKEN and SUPABASE_URL and SUPABASE_KEY and GEMINI_KEY):
     logger.warning("One or more required environment variables are missing. "
@@ -257,3 +257,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
