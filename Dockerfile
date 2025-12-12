@@ -16,6 +16,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY bot.py .
 
-# Start the bot
-CMD ["python3", "bot.py"]
+# Expose port for FastAPI
+EXPOSE 10000
 
+# Use Uvicorn to run the FastAPI webhook server
+CMD ["uvicorn", "bot:app", "--host", "0.0.0.0", "--port", "10000"]
